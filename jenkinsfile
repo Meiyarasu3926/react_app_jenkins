@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'react-nginx-app:latest'
+        CONTAINER_NAME = 'react-nginx-app'
+        APP_PORT = '80'
+        HOST_PORT = '3000'
+    }
+    
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Meiyarasu3926/react_app_jenkins.git'
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                # Build the Docker image
+                docker build -t $DOCKER_IMAGE .
+                '''
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                sh '''
+                # Create a temporary container to run tests
+                docker create --name temp-container $DOCKER_IMAGE
+                
+                # You can add more specific test commands here
+                # For example, copying test files and running them inside the container
+                
+                # Clean up the temporary container
+                docker rm temp-container || true
+                
+                echo "Tests completed"
+                '''
+            }
+        }
+        
+        stage('Deploy React App') {
+            steps {
+                sh '''
+                # Stop and remove any existing container with the same name
+                docker stop $CONTAINER_NAME || true
+                docker rm $CONTAINER_NAME || true
+                
+                # Run the new container, mapping port 3000 to container port 80 (Nginx)
+                docker run -d --name $CONTAINER_NAME -p $HOST_PORT:$APP_PORT $DOCKER_IMAGE
+                
+                # Wait for the app to start
+                sleep 5
+                
+                # Check if the container is running
+                max_attempts=5
+                attempt=0
+                success=false
+                
+                while [ $attempt -lt $max_attempts ]; do
+                    if docker ps | grep -q $CONTAINER_NAME; then
+                        # Perform health check by checking if Nginx responds
+                        response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$HOST_PORT)
+                        if [ "$response" = "200" ]; then
+                            echo "Health check successful"
+                            success=true
+                            break
+                        fi
+                    fi
+                    
+                    echo "Attempt $((attempt+1))/$max_attempts failed"
+                    sleep 5
+                    attempt=$((attempt+1))
+                done
+                
+                if [ "$success" != "true" ]; then
+                    echo "Failed to start application"
+                    docker logs $CONTAINER_NAME
+                    exit 1
+                fi
+                '''
+            }
+        }
+        
+        stage('Public Access Info') {
+            steps {
+                sh '''
+                echo "React application should be running on:"
+                echo "Internal URL: http://localhost:$HOST_PORT"
+                
+                # Fetch public IP using an external service
+                public_ip=$(curl -s https://api.ipify.org)
+                
+                echo "Public IP: $public_ip"
+                echo "Full Public URL: http://$public_ip:$HOST_PORT"
+                
+                # Create a simple info file
+                echo "React application is running at: http://$public_ip:$HOST_PORT" > app_info.txt
+                echo "Container ID: $(docker inspect --format='{{.Id}}' $CONTAINER_NAME)" >> app_info.txt
+                cat app_info.txt
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+            sh 'cat app_info.txt || echo "React application is running in Docker container on port $HOST_PORT"'
+        }
+        failure {
+            echo 'Pipeline failed!'
+            sh 'docker logs $CONTAINER_NAME || true'
+        }
+        always {
+            echo 'Finished pipeline execution'
+        }
+    }
+}
